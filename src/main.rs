@@ -58,12 +58,17 @@ async fn embeddings_api_call(dimensions:f32, model_name:&str) -> Result<Vec<Vec<
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     
-    const dimensions: f32 = 512.0;
-    const model_name: &str = "nvidia/llama-nemotron-embed-vl-1b-v2:free"; 
+    const DIMENSIONS: f32 = 512.0;
+    const MODEL_NAME: &str = "nvidia/llama-nemotron-embed-vl-1b-v2:free"; 
 
-    let embeddings = embeddings_api_call(dimensions,model_name).await?;
+    let embeddings = embeddings_api_call(DIMENSIONS,MODEL_NAME).await?;
+    let store: VectorStore = VectorStore::new();
 
-    println!("{}", serde_json::to_string_pretty(&embeddings)?);
+    for embed in embeddings.into_iter();
+        store.upsert(
+            
+        )
+    
 
     Ok(())
 }
