@@ -5,27 +5,19 @@ use serde::{Deserialize, Serialize};
 pub struct EmbeddingsRequest {
     input: Vec<String>,
     model: String,
-    dimensions:  f32,
+    dimensions: usize,
     encoding_format: String,
-    input_type: String,
 }
 
 impl EmbeddingsRequest {
-    pub fn new(input: Vec<String>, model: &str, dimensions: f32) -> Self {
+    pub fn new(input: Vec<String>, model: &str, dimensions: usize) -> Self {
         Self {
             input,
-            model:model.to_string(),
+            model: model.to_string(),
             dimensions,
             encoding_format: "float".to_string(),
-            input_type: "query".to_string(),
         }
     }
-
-    pub fn new_fromstring(){
-
-    }
-
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,4 +34,21 @@ impl EmbeddingsResponse {
 #[derive(Debug, Deserialize)]
 struct EmbeddingItem {
     embedding: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingsApiResponse {
+    Success(EmbeddingsResponse),
+    Error(OpenRouterErrorResponse),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenRouterErrorResponse {
+    pub error: OpenRouterError,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenRouterError {
+    pub message: String,
 }

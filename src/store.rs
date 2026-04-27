@@ -74,7 +74,7 @@ impl VectorStore {
         }
 
         for (_dis,idx) in bmap.iter().take(k) {
-            let vector = self.get(&idx).unwrap();
+            let vector = self.get(idx).unwrap();
             results.push(vector.vec);
         }
 

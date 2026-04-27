@@ -1,5 +1,8 @@
 /target
+/corpus
 .env
+.gitignore
 *.codex
-*AGENT.md
+*AGENTS.md
 changes.md
+agents.md

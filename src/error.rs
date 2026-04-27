@@ -13,19 +13,51 @@ pub enum VectorIDError{
     NotFound(String),
 }
 
+
 #[derive(Debug, thiserror::Error)]
-pub enum MainError {
+pub enum DotEnvError {
     #[error(transparent)]
     Dotenv(#[from] dotenvy::Error),
     #[error("missing {key} in {path}")]
     MissingEnvVar { key: &'static str, path: PathBuf },
+ 
+}
+
+#[derive(Debug,thiserror::Error)]
+pub enum ApiError{
     #[error(transparent)]
     Request(#[from] reqwest::Error),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
     #[error("OpenRouter returned {status}: {body}")]
     Api {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TextError {
+    #[error("failed to read {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to initialize sentence segmenter: {0}")]
+    SegmenterInit(String),
+}
+
+
+#[derive(Debug, thiserror::Error)]
+pub enum MainError {
+    #[error(transparent)]
+    VectorIDError(#[from]VectorIDError),
+    #[error(transparent)]
+    DotEnvError(#[from]DotEnvError),
+    #[error(transparent)]
+    ApiError(#[from]ApiError),
+    #[error(transparent)]
+    TextError(#[from]TextError),   
 }

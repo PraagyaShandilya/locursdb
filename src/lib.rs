@@ -6,9 +6,9 @@ mod distance;
 mod store;
 
 
-pub use embedding::{EmbeddingsRequest,EmbeddingsResponse};
+pub use embedding::{EmbeddingsApiResponse, EmbeddingsRequest, EmbeddingsResponse};
 pub use distance::DistanceMetric;
-pub use error::{MainError, VectorIDError};
+pub use error::{MainError, VectorIDError, DotEnvError, ApiError, TextError};
 pub use id::VectorID;
 pub use point::{ChunkMetadata, ContentHash, DocumentId, Point, SourceUri};
 pub use store::VectorStore;
