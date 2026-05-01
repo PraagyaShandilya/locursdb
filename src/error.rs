@@ -1,3 +1,4 @@
+use std::num::ParseIntError;
 use std::path::PathBuf;
 
 
@@ -20,7 +21,13 @@ pub enum DotEnvError {
     Dotenv(#[from] dotenvy::Error),
     #[error("missing {key} in {path}")]
     MissingEnvVar { key: &'static str, path: PathBuf },
- 
+    #[error("invalid usize for {key}: {value}")]
+    InvalidUsize {
+        key: &'static str,
+        value: String,
+        #[source]
+        source: ParseIntError,
+    },
 }
 
 #[derive(Debug,thiserror::Error)]

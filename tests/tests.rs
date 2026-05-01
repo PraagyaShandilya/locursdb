@@ -180,6 +180,6 @@ fn get_top_k_returns_nearest_vectors_for_euclidean_distance() {
     let top_k = store.get_top_k(&query, 2);
 
     assert_eq!(top_k.len(), 2);
-    assert_eq!(top_k[0], vec![0.0_f32, 0.0]);
-    assert_eq!(top_k[1], vec![1.0_f32, 1.0]);
+    assert_eq!(top_k[0].vec, vec![0.0_f32, 0.0]);
+    assert_eq!(top_k[1].vec, vec![1.0_f32, 1.0]);
 }
