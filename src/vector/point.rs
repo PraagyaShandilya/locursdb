@@ -1,4 +1,4 @@
-use crate::id::VectorID;
+use super::VectorID;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

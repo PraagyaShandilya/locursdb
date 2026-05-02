@@ -4,10 +4,9 @@ use base64::prelude::*;
 use ordered_float::OrderedFloat;
 use ulid::Ulid;
 
-use crate::distance::DistanceMetric;
 use crate::error::VectorIDError;
-use crate::id::VectorID;
-use crate::point::{ChunkMetadata, ContentHash, DocumentId, Point, SourceUri};
+
+use super::{ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID};
 
 #[derive(Debug)]
 pub struct VectorStore {

@@ -1,21 +1,16 @@
-mod api;
 pub mod app;
 mod config;
-mod distance;
 mod embedding;
 mod error;
-mod id;
 mod ingest;
-mod point;
-mod store;
+mod tui;
+mod vector;
 
-pub use api::ApiClient;
 pub use app::run;
 pub use config::AppConfig;
-pub use distance::DistanceMetric;
-pub use embedding::{EmbeddingsApiResponse, EmbeddingsRequest, EmbeddingsResponse};
+pub use embedding::{ApiClient, EmbeddingsApiResponse, EmbeddingsRequest, EmbeddingsResponse};
 pub use error::{ApiError, DotEnvError, MainError, TextError, VectorIDError};
-pub use id::VectorID;
 pub use ingest::{FileType, Ingest};
-pub use point::{ChunkMetadata, ContentHash, DocumentId, Point, SourceUri};
-pub use store::VectorStore;
+pub use vector::{
+    ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID, VectorStore,
+};

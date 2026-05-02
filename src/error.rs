@@ -1,19 +1,17 @@
 use std::num::ParseIntError;
 use std::path::PathBuf;
 
-
-#[derive(thiserror::Error,Debug)] 
-pub enum VectorIDError{
+#[derive(thiserror::Error, Debug)]
+pub enum VectorIDError {
     #[error("Vec Dimensions mismatched: expected {expected}, got {actual}")]
-    DimMismatch{expected: usize, actual: usize},
+    DimMismatch { expected: usize, actual: usize },
 
     #[error("Duplicate Vec ID: {0}")]
     DuplicateId(String),
-    
+
     #[error("Vector not found: {0}")]
     NotFound(String),
 }
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum DotEnvError {
@@ -30,8 +28,8 @@ pub enum DotEnvError {
     },
 }
 
-#[derive(Debug,thiserror::Error)]
-pub enum ApiError{
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
     #[error(transparent)]
     Request(#[from] reqwest::Error),
     #[error("OpenRouter returned {status}: {body}")]
@@ -56,15 +54,16 @@ pub enum TextError {
     SegmenterInit(String),
 }
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum MainError {
     #[error(transparent)]
-    VectorIDError(#[from]VectorIDError),
+    TerminalIo(#[from] std::io::Error),
     #[error(transparent)]
-    DotEnvError(#[from]DotEnvError),
+    VectorIDError(#[from] VectorIDError),
     #[error(transparent)]
-    ApiError(#[from]ApiError),
+    DotEnvError(#[from] DotEnvError),
     #[error(transparent)]
-    TextError(#[from]TextError),   
+    ApiError(#[from] ApiError),
+    #[error(transparent)]
+    TextError(#[from] TextError),
 }

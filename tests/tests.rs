@@ -31,11 +31,13 @@ fn assert_close(actual: f32, expected: f32) {
 #[test]
 fn insert_and_count() {
     let mut store = VectorStore::new(DistanceMetric::Euclid);
-    store.upsert(
-        VectorID::new(),
-        vec![0.1_f32, 0.2, 0.3],
-        make_metadata("doc_1", "memory://hello-world", 0),
-    ).unwrap();
+    store
+        .upsert(
+            VectorID::new(),
+            vec![0.1_f32, 0.2, 0.3],
+            make_metadata("doc_1", "memory://hello-world", 0),
+        )
+        .unwrap();
     assert_eq!(store.len(), 1);
 }
 
@@ -50,11 +52,13 @@ fn dimension_mismatch_rejected() {
         )
         .unwrap();
 
-    let err = store.upsert(
-        VectorID::new(),
-        vec![0.1, 0.2, 0.3],  // wrong dimension!
-        make_metadata("doc_b", "memory://b", 0),
-    ).unwrap_err();
+    let err = store
+        .upsert(
+            VectorID::new(),
+            vec![0.1, 0.2, 0.3], // wrong dimension!
+            make_metadata("doc_b", "memory://b", 0),
+        )
+        .unwrap_err();
 
     assert!(matches!(err, VectorIDError::DimMismatch { .. }));
 }

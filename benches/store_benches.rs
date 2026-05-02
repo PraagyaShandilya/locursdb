@@ -2,8 +2,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use locursdb::{
-    ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID,
-    VectorStore,
+    ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID, VectorStore,
 };
 
 fn make_metadata(document_id: &str, source_uri: &str, chunk_index: usize) -> ChunkMetadata {
@@ -48,8 +47,8 @@ fn build_store(size: usize, dim: usize, metric: DistanceMetric) -> VectorStore {
 fn bench_get_top_k(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_top_k");
 
-    for size in [100_usize, 1_000, 10_000] {
-        for dim in [128_usize, 512] {
+    for size in [100_usize, 1_000, 10_000, 50_000, 100_000, 200_000] {
+        for dim in [512, 1024] {
             let store = build_store(size, dim, DistanceMetric::Euclid);
             let query = make_point(dim, 999_999);
 
@@ -69,7 +68,7 @@ fn bench_get_top_k(c: &mut Criterion) {
 fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
 
-    for size in [100_usize, 1_000, 10_000] {
+    for size in [100_usize, 1_000, 10_000, 50_000, 100_000, 200_000] {
         let mut store = VectorStore::new(DistanceMetric::Euclid);
         let target_id = VectorID::new();
 
@@ -102,7 +101,7 @@ fn bench_get(c: &mut Criterion) {
 fn bench_upsert(c: &mut Criterion) {
     let mut group = c.benchmark_group("upsert");
 
-    for size in [100_usize, 1_000, 10_000] {
+    for size in [100_usize, 1_000, 10_000, 50_000, 100_000, 200_000] {
         group.bench_with_input(BenchmarkId::new("fresh_insert", size), &size, |b, &n| {
             b.iter(|| {
                 let mut store = VectorStore::new(DistanceMetric::Euclid);
@@ -126,7 +125,7 @@ fn bench_upsert(c: &mut Criterion) {
 fn bench_distance_metrics(c: &mut Criterion) {
     let mut group = c.benchmark_group("distance");
 
-    for dim in [128_usize, 512, 1536] {
+    for dim in [128_usize, 512, 1536, 2048, 4096] {
         let p1 = make_point(dim, 1);
         let p2 = make_point(dim, 2);
 

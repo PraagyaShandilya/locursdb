@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize)]
 pub struct EmbeddingsRequest {
     input: Vec<String>,

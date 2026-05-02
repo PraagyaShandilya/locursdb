@@ -6,10 +6,13 @@ use crate::DotEnvError;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub env_path: PathBuf,
+    pub corpus_dir: PathBuf,
     pub corpus_path: PathBuf,
     pub batch_size: usize,
+    pub embedding_concurrency: usize,
     pub chunk_size: usize,
     pub dimensions: usize,
+    pub top_k: usize,
     pub openrouter_api_key: String,
     pub model_name: String,
 }
@@ -22,11 +25,22 @@ impl AppConfig {
 
         Ok(Self {
             env_path,
-            corpus_path: manifest_dir.join("corpus/sample.txt"),
+            corpus_dir: manifest_dir.join("corpus"),
+            corpus_path: parse_path(
+                &values,
+                "CORPUS_PATH",
+                manifest_dir.join("corpus/sample.txt"),
+            ),
             batch_size: parse_usize(&values, "BATCH_SIZE")?,
+            embedding_concurrency: parse_usize(&values, "EMBEDDING_CONCURRENCY")?,
             chunk_size: parse_usize(&values, "CHUNK_SIZE")?,
             dimensions: parse_usize(&values, "DIMENSIONS")?,
-            openrouter_api_key: get_required(&values, "OPENROUTER_API_KEY", &manifest_dir.join(".env"))?,
+            top_k: parse_optional_usize(&values, "TOP_K", 5)?,
+            openrouter_api_key: get_required(
+                &values,
+                "OPENROUTER_API_KEY",
+                &manifest_dir.join(".env"),
+            )?,
             model_name: get_required(&values, "MODEL_NAME", &manifest_dir.join(".env"))?,
         })
     }
@@ -59,10 +73,42 @@ fn get_required(
 }
 
 fn parse_usize(values: &HashMap<String, String>, key: &'static str) -> Result<usize, DotEnvError> {
-    let value = get_required(values, key, &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"))?;
-    value.parse::<usize>().map_err(|source| DotEnvError::InvalidUsize {
+    let value = get_required(
+        values,
         key,
-        value,
-        source,
-    })
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"),
+    )?;
+    parse_usize_value(key, value)
+}
+
+fn parse_optional_usize(
+    values: &HashMap<String, String>,
+    key: &'static str,
+    default: usize,
+) -> Result<usize, DotEnvError> {
+    values
+        .get(key)
+        .cloned()
+        .map(|value| parse_usize_value(key, value))
+        .unwrap_or(Ok(default))
+}
+
+fn parse_usize_value(key: &'static str, value: String) -> Result<usize, DotEnvError> {
+    value
+        .parse::<usize>()
+        .map_err(|source| DotEnvError::InvalidUsize { key, value, source })
+}
+
+fn parse_path(values: &HashMap<String, String>, key: &'static str, default: PathBuf) -> PathBuf {
+    values
+        .get(key)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
+            }
+        })
+        .unwrap_or(default)
 }
