@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::io::{self, Stdout, stdout};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -9,8 +11,11 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Buffer, Color, Line, Modifier, Span, Style, Stylize};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Widget, Wrap};
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use crate::EmbeddingProgress;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -26,6 +31,8 @@ pub struct Interface {
     query: String,
     results: Vec<String>,
     status: String,
+    completed_batches: usize,
+    total_batches: usize,
     submitted: bool,
     input_mode: InputMode,
     running_state: RunningState,
@@ -43,6 +50,7 @@ enum InputMode {
     #[default]
     CorpusFile,
     Query,
+    Processing,
     Results,
 }
 
@@ -53,6 +61,7 @@ enum Message {
     SwitchField,
     Submit,
     Quit,
+    Progress(EmbeddingProgress),
 }
 
 impl Interface {
@@ -61,6 +70,14 @@ impl Interface {
             corpus_file: default_corpus_file,
             status: "Enter corpus filename, press Tab for query, Enter to run, Esc/q to quit"
                 .to_string(),
+            ..Self::default()
+        }
+    }
+
+    fn processing() -> Self {
+        Self {
+            input_mode: InputMode::Processing,
+            status: "Preparing embedding work...".to_string(),
             ..Self::default()
         }
     }
@@ -75,7 +92,15 @@ impl Interface {
     }
 }
 
-pub fn collect_input(default_corpus_path: PathBuf) -> io::Result<Option<TuiInput>> {
+pub async fn collect_input_and_process<T, E, F, Fut>(
+    default_corpus_path: PathBuf,
+    process: F,
+) -> Result<Option<T>, E>
+where
+    E: From<io::Error>,
+    F: FnOnce(TuiInput, UnboundedSender<EmbeddingProgress>) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
     let _guard = TerminalGuard::enter()?;
     let mut terminal = init_terminal()?;
 
@@ -97,12 +122,29 @@ pub fn collect_input(default_corpus_path: PathBuf) -> io::Result<Option<TuiInput
         return Ok(None);
     }
 
-    let corpus_path = resolve_corpus_path(default_corpus_path, interface.corpus_file);
-
-    Ok(Some(TuiInput {
-        corpus_path,
+    let input = TuiInput {
+        corpus_path: resolve_corpus_path(default_corpus_path, interface.corpus_file),
         query: interface.query,
-    }))
+    };
+
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let mut interface = Interface::processing();
+    let future = process(input, progress_tx);
+    let mut future = pin!(future);
+
+    loop {
+        drain_progress(&mut interface, &mut progress_rx);
+        terminal.draw(|frame| view(&interface, frame))?;
+
+        tokio::select! {
+            result = &mut future => return result.map(Some),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if let Some(Message::Quit) = handle_event_now()? {
+                    interface.status = "Processing is still running; quit is disabled during embedding.".to_string();
+                }
+            }
+        }
+    }
 }
 
 pub fn show_results(results: Vec<String>) -> io::Result<()> {
@@ -119,6 +161,15 @@ pub fn show_results(results: Vec<String>) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn drain_progress(
+    interface: &mut Interface,
+    progress_rx: &mut UnboundedReceiver<EmbeddingProgress>,
+) {
+    while let Ok(progress) = progress_rx.try_recv() {
+        update(interface, Message::Progress(progress));
+    }
 }
 
 fn resolve_corpus_path(default_corpus_path: PathBuf, corpus_file: String) -> PathBuf {
@@ -139,7 +190,7 @@ fn update(interface: &mut Interface, message: Message) {
         Message::Input(character) => match interface.input_mode {
             InputMode::CorpusFile => interface.corpus_file.push(character),
             InputMode::Query => interface.query.push(character),
-            InputMode::Results => {}
+            InputMode::Processing | InputMode::Results => {}
         },
         Message::Backspace => match interface.input_mode {
             InputMode::CorpusFile => {
@@ -148,17 +199,22 @@ fn update(interface: &mut Interface, message: Message) {
             InputMode::Query => {
                 interface.query.pop();
             }
-            InputMode::Results => {}
+            InputMode::Processing | InputMode::Results => {}
         },
         Message::SwitchField => {
             interface.input_mode = match interface.input_mode {
                 InputMode::CorpusFile => InputMode::Query,
                 InputMode::Query => InputMode::CorpusFile,
+                InputMode::Processing => InputMode::Processing,
                 InputMode::Results => InputMode::Results,
             };
         }
         Message::Submit => {
-            if interface.input_mode == InputMode::Results || !interface.query.trim().is_empty() {
+            if matches!(
+                interface.input_mode,
+                InputMode::Processing | InputMode::Results
+            ) || !interface.query.trim().is_empty()
+            {
                 interface.submitted = true;
                 interface.running_state = RunningState::Done;
             } else {
@@ -167,8 +223,18 @@ fn update(interface: &mut Interface, message: Message) {
             }
         }
         Message::Quit => {
-            interface.submitted = false;
-            interface.running_state = RunningState::Done;
+            if interface.input_mode == InputMode::Processing {
+                interface.status =
+                    "Processing is still running; quit is disabled during embedding.".to_string();
+            } else {
+                interface.submitted = false;
+                interface.running_state = RunningState::Done;
+            }
+        }
+        Message::Progress(progress) => {
+            interface.completed_batches = progress.completed_batches;
+            interface.total_batches = progress.total_batches;
+            interface.status = progress.message;
         }
     }
 }
@@ -183,7 +249,15 @@ fn view(interface: &Interface, frame: &mut Frame) {
 }
 
 fn handle_event() -> io::Result<Option<Message>> {
-    if event::poll(Duration::from_millis(250))?
+    handle_event_with_timeout(Duration::from_millis(250))
+}
+
+fn handle_event_now() -> io::Result<Option<Message>> {
+    handle_event_with_timeout(Duration::ZERO)
+}
+
+fn handle_event_with_timeout(timeout: Duration) -> io::Result<Option<Message>> {
+    if event::poll(timeout)?
         && let Event::Key(key) = event::read()?
         && key.kind == KeyEventKind::Press
     {
@@ -226,6 +300,7 @@ impl Widget for &Interface {
             .split(area);
 
         match self.input_mode {
+            InputMode::Processing => self.render_processing(chunks[2], buf),
             InputMode::Results => self.render_results(chunks[2], buf),
             InputMode::CorpusFile | InputMode::Query => {
                 self.render_form(chunks[0], chunks[1], chunks[2], buf)
@@ -240,7 +315,7 @@ impl Widget for &Interface {
 
 impl Interface {
     fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
-        if self.input_mode == InputMode::Results {
+        if matches!(self.input_mode, InputMode::Processing | InputMode::Results) {
             return None;
         }
 
@@ -258,7 +333,7 @@ impl Interface {
         let (field_area, text) = match self.input_mode {
             InputMode::CorpusFile => (chunks[0], self.corpus_file.as_str()),
             InputMode::Query => (chunks[1], self.query.as_str()),
-            InputMode::Results => return None,
+            InputMode::Processing | InputMode::Results => return None,
         };
 
         let max_x = field_area.right().saturating_sub(2);
@@ -309,6 +384,47 @@ impl Interface {
             .block(Block::default().title(" Help ").borders(Borders::ALL))
             .wrap(Wrap { trim: true })
             .render(help_area, buf);
+    }
+
+    fn render_processing(&self, area: Rect, buf: &mut Buffer) {
+        let ratio = if self.total_batches == 0 {
+            0.0
+        } else {
+            self.completed_batches as f64 / self.total_batches as f64
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(3),
+            ])
+            .split(area);
+
+        Gauge::default()
+            .block(
+                Block::default()
+                    .title(" Embedding progress ")
+                    .borders(Borders::ALL),
+            )
+            .gauge_style(Style::default().fg(Color::Green))
+            .ratio(ratio.clamp(0.0, 1.0))
+            .label(format!(
+                "{}/{} batches",
+                self.completed_batches, self.total_batches
+            ))
+            .render(chunks[0], buf);
+
+        let detail = vec![
+            Line::from("The interface will stay open while embeddings and search run."),
+            Line::from("Detailed traces are also written to log/embedding.log."),
+        ];
+
+        Paragraph::new(detail)
+            .block(Block::default().title(" Processing ").borders(Borders::ALL))
+            .wrap(Wrap { trim: true })
+            .render(chunks[1], buf);
     }
 
     fn render_results(&self, area: Rect, buf: &mut Buffer) {

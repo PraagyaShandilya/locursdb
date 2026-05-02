@@ -22,6 +22,14 @@ Optional:
 cargo run
 ```
 
+During embedding and query processing, the TUI stays open and displays embedding batch progress. Detailed progress traces are also written to:
+
+```text
+log/embedding.log
+```
+
+The file is overwritten on each run.
+
 ### TUI controls
 
 - `Tab`: switch input field

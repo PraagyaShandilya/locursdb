@@ -1,6 +1,12 @@
-use futures::{StreamExt, stream};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
-use crate::ApiError;
+use futures::{StreamExt, stream};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::{ApiError, EmbeddingLogger, EmbeddingProgress};
 
 use super::{EmbeddingsApiResponse, EmbeddingsRequest};
 
@@ -71,21 +77,118 @@ impl ApiClient {
         &self,
         input: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, ApiError> {
+        self.convert_input_to_embeddings_with_logger(input, None)
+            .await
+    }
+
+    pub async fn convert_input_to_embeddings_with_logger(
+        &self,
+        input: Vec<String>,
+        logger: Option<&EmbeddingLogger>,
+    ) -> Result<Vec<Vec<f32>>, ApiError> {
+        self.convert_input_to_embeddings_with_progress(input, logger, None)
+            .await
+    }
+
+    pub async fn convert_input_to_embeddings_with_progress(
+        &self,
+        input: Vec<String>,
+        logger: Option<&EmbeddingLogger>,
+        progress: Option<UnboundedSender<EmbeddingProgress>>,
+    ) -> Result<Vec<Vec<f32>>, ApiError> {
         let batches: Vec<Vec<String>> = input
             .chunks(self.batch_size)
             .map(|batch| batch.to_vec())
             .collect();
+        let batch_count = batches.len();
 
-        let batch_results: Vec<Result<Vec<Vec<f32>>, ApiError>> = stream::iter(batches)
-            .map(|batch| self.embeddings_api_call(batch))
-            .buffered(self.embedding_concurrency)
-            .collect()
-            .await;
+        if let Some(logger) = logger {
+            logger.trace(format!(
+                "embedding conversion started: chunks={}, batch_size={}, batches={}, concurrency={}",
+                input.len(), self.batch_size, batch_count, self.embedding_concurrency
+            ));
+        }
+        if let Some(progress) = &progress {
+            let _ = progress.send(EmbeddingProgress::new(
+                0,
+                batch_count,
+                format!(
+                    "starting embedding: {} chunks in {batch_count} batches",
+                    input.len()
+                ),
+            ));
+        }
+
+        let completed_batches = Arc::new(AtomicUsize::new(0));
+
+        let batch_results: Vec<Result<Vec<Vec<f32>>, ApiError>> = stream::iter(
+            batches
+                .into_iter()
+                .enumerate()
+                .map(|(index, batch)| (index + 1, batch)),
+        )
+        .map(|(batch_number, batch)| {
+            let logger = logger.cloned();
+            let progress = progress.clone();
+            let completed_batches = completed_batches.clone();
+            async move {
+                if let Some(logger) = &logger {
+                    logger.trace(format!(
+                        "embedding batch {batch_number}/{batch_count} started: inputs={}",
+                        batch.len()
+                    ));
+                }
+
+                let result = self.embeddings_api_call(batch).await;
+
+                if let Some(logger) = &logger {
+                    match &result {
+                        Ok(embeddings) => logger.trace(format!(
+                            "embedding batch {batch_number}/{batch_count} finished: embeddings={}",
+                            embeddings.len()
+                        )),
+                        Err(error) => logger.trace(format!(
+                            "embedding batch {batch_number}/{batch_count} failed: {error}"
+                        )),
+                    }
+                }
+                if let Some(progress) = &progress {
+                    let message = match &result {
+                        Ok(embeddings) => format!(
+                            "finished batch {batch_number}/{batch_count}: {} embeddings",
+                            embeddings.len()
+                        ),
+                        Err(error) => format!("failed batch {batch_number}/{batch_count}: {error}"),
+                    };
+                    let completed = completed_batches.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = progress.send(EmbeddingProgress::new(completed, batch_count, message));
+                }
+
+                result
+            }
+        })
+        .buffered(self.embedding_concurrency)
+        .collect()
+        .await;
 
         let mut embeddings = Vec::new();
 
         for result in batch_results {
             embeddings.extend(result?);
+        }
+
+        if let Some(logger) = logger {
+            logger.trace(format!(
+                "embedding conversion finished: embeddings={}",
+                embeddings.len()
+            ));
+        }
+        if let Some(progress) = &progress {
+            let _ = progress.send(EmbeddingProgress::new(
+                batch_count,
+                batch_count,
+                format!("embedding finished: {} embeddings", embeddings.len()),
+            ));
         }
 
         Ok(embeddings)
