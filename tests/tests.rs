@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use locursdb::{
     ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID,
     VectorIDError, VectorStore,
@@ -9,7 +11,28 @@ fn make_metadata(document_id: &str, source_uri: &str, chunk_index: usize) -> Chu
         source_uri: SourceUri(source_uri.to_string()),
         chunk_index,
         content_hash: ContentHash(format!("hash_{chunk_index}")),
+        content: format!("content_{chunk_index}"),
+        labels: HashMap::new(),
+        path: None,
+        start_line: None,
+        end_line: None,
+        language: None,
+        session_folder: None,
     }
+}
+
+fn make_labeled_metadata(
+    document_id: &str,
+    source_uri: &str,
+    chunk_index: usize,
+    labels: &[(&str, &str)],
+) -> ChunkMetadata {
+    let mut metadata = make_metadata(document_id, source_uri, chunk_index);
+    metadata.labels = labels
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    metadata
 }
 
 fn make_point(vec: Vec<f32>) -> Point {
@@ -186,4 +209,64 @@ fn get_top_k_returns_nearest_vectors_for_euclidean_distance() {
     assert_eq!(top_k.len(), 2);
     assert_eq!(top_k[0].vec, vec![0.0_f32, 0.0]);
     assert_eq!(top_k[1].vec, vec![1.0_f32, 1.0]);
+}
+
+#[test]
+fn get_top_k_filtered_requires_all_label_matches() {
+    let mut store = VectorStore::new(DistanceMetric::Euclid);
+
+    store
+        .upsert(
+            VectorID::new(),
+            vec![0.0_f32, 0.0],
+            make_labeled_metadata(
+                "doc_a",
+                "memory://a",
+                0,
+                &[("session", "a"), ("role", "user")],
+            ),
+        )
+        .unwrap();
+    store
+        .upsert(
+            VectorID::new(),
+            vec![0.0_f32, 0.1],
+            make_labeled_metadata(
+                "doc_b",
+                "memory://b",
+                1,
+                &[("session", "a"), ("role", "assistant")],
+            ),
+        )
+        .unwrap();
+    store
+        .upsert(
+            VectorID::new(),
+            vec![0.0_f32, 0.2],
+            make_labeled_metadata(
+                "doc_c",
+                "memory://c",
+                2,
+                &[("session", "b"), ("role", "user")],
+            ),
+        )
+        .unwrap();
+
+    let filters = HashMap::from([
+        ("session".to_string(), "a".to_string()),
+        ("role".to_string(), "user".to_string()),
+    ]);
+    let query = make_point(vec![0.0_f32, 0.0]);
+    let top_k = store.get_top_k_filtered(&query, 10, &filters);
+
+    assert_eq!(top_k.len(), 1);
+    assert_eq!(top_k[0].metadata.content, "content_0");
+    assert_eq!(
+        top_k[0].metadata.labels.get("session"),
+        Some(&"a".to_string())
+    );
+    assert_eq!(
+        top_k[0].metadata.labels.get("role"),
+        Some(&"user".to_string())
+    );
 }

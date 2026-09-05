@@ -1,4 +1,5 @@
-use base64::prelude::*;
+use std::collections::HashMap;
+
 use ulid::Ulid;
 
 use crate::{
@@ -100,7 +101,14 @@ async fn run_query(
             document_id: DocumentId(Ulid::new().to_string()),
             source_uri: SourceUri(api.model_name().to_string()),
             chunk_index: 0,
-            content_hash: ContentHash(BASE64_STANDARD.encode(query.as_bytes())),
+            content_hash: ContentHash(blake3::hash(query.as_bytes()).to_string()),
+            content: query,
+            labels: HashMap::new(),
+            path: None,
+            start_line: None,
+            end_line: None,
+            language: None,
+            session_folder: None,
         },
     };
 
@@ -108,12 +116,7 @@ async fn run_query(
     let results = store
         .get_top_k(&query_point, top_k)
         .into_iter()
-        .map(
-            |point| match BASE64_STANDARD.decode(point.metadata.content_hash.0.as_bytes()) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                Err(err) => format!("<base64 decode error: {err}>"),
-            },
-        )
+        .map(|point| point.metadata.content)
         .collect();
     logger.trace("top-k search finished");
 

@@ -66,4 +66,6 @@ pub enum MainError {
     ApiError(#[from] ApiError),
     #[error(transparent)]
     TextError(#[from] TextError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

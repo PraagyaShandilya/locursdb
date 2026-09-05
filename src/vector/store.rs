@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
-use base64::prelude::*;
 use ordered_float::OrderedFloat;
 use ulid::Ulid;
 
@@ -8,7 +7,9 @@ use crate::error::VectorIDError;
 
 use super::{ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID};
 
-#[derive(Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VectorStore {
     points: Vec<Point>,
     dim: usize,
@@ -20,6 +21,14 @@ impl VectorStore {
         Self {
             points: Vec::new(),
             dim: 0,
+            metric,
+        }
+    }
+
+    pub fn with_dimensions(metric: DistanceMetric, dim: usize) -> Self {
+        Self {
+            points: Vec::new(),
+            dim,
             metric,
         }
     }
@@ -66,7 +75,14 @@ impl VectorStore {
                 document_id: document_id.clone(),
                 source_uri: SourceUri(model_name.clone()),
                 chunk_index: idx,
-                content_hash: ContentHash(BASE64_STANDARD.encode(input.as_bytes())),
+                content_hash: ContentHash(blake3::hash(input.as_bytes()).to_string()),
+                content: input,
+                labels: HashMap::new(),
+                path: None,
+                start_line: None,
+                end_line: None,
+                language: None,
+                session_folder: None,
             };
 
             self.upsert(VectorID::new(), embed, meta)?;
@@ -88,23 +104,49 @@ impl VectorStore {
     }
 
     pub fn get_top_k(&self, query: &Point, k: usize) -> Vec<Point> {
-        let mut bmap = BTreeMap::new();
-        let mut results = Vec::new();
+        self.get_top_k_filtered(query, k, &HashMap::new())
+    }
 
-        for point in &self.points {
-            let distance = self.metric.distance(query, point);
-            bmap.insert(OrderedFloat(distance), point.id);
-        }
+    pub fn get_top_k_filtered(
+        &self,
+        query: &Point,
+        k: usize,
+        filters: &HashMap<String, String>,
+    ) -> Vec<Point> {
+        self.get_top_k_filtered_with_scores(query, k, filters)
+            .into_iter()
+            .map(|(point, _)| point)
+            .collect()
+    }
 
-        for (_, id) in bmap.iter().take(k) {
-            let vector = self.get(id).unwrap();
-            results.push(vector);
-        }
+    pub fn get_top_k_filtered_with_scores(
+        &self,
+        query: &Point,
+        k: usize,
+        filters: &HashMap<String, String>,
+    ) -> Vec<(Point, f32)> {
+        let mut scored: Vec<_> = self
+            .points
+            .iter()
+            .filter(|point| labels_match(&point.metadata.labels, filters))
+            .map(|point| (OrderedFloat(self.metric.distance(query, point)), point.id))
+            .collect();
+        scored.sort_by_key(|(distance, id)| (*distance, id.to_string()));
 
-        results
+        scored
+            .into_iter()
+            .take(k)
+            .filter_map(|(distance, id)| self.get(&id).ok().map(|point| (point, distance.0)))
+            .collect()
     }
 
     pub fn len(&self) -> usize {
         self.points.len()
     }
+}
+
+fn labels_match(labels: &HashMap<String, String>, filters: &HashMap<String, String>) -> bool {
+    filters
+        .iter()
+        .all(|(key, value)| labels.get(key) == Some(value))
 }

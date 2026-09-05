@@ -1,5 +1,7 @@
 /target
 /corpus
+/log
+/.locursdb
 .env
 .gitignore
 *.codex

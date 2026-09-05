@@ -1,6 +1,10 @@
-use locursdb::{MainError, run};
+use locursdb::{MainError, run, run_cli};
 
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
-    run().await
+    if std::env::args().len() > 1 {
+        run_cli().await
+    } else {
+        run().await
+    }
 }

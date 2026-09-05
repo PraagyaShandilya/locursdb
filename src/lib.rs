@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cli;
 mod config;
 mod embedding;
 mod error;
@@ -8,6 +9,7 @@ mod tui;
 mod vector;
 
 pub use app::run;
+pub use cli::run_cli;
 pub use config::AppConfig;
 pub use embedding::{ApiClient, EmbeddingsApiResponse, EmbeddingsRequest, EmbeddingsResponse};
 pub use error::{ApiError, DotEnvError, MainError, TextError, VectorIDError};

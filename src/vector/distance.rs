@@ -1,6 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 use super::Point;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DistanceMetric {
     Cos,
     Euclid,
