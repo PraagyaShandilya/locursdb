@@ -11,6 +11,8 @@ fn make_metadata(document_id: &str, source_uri: &str, chunk_index: usize) -> Chu
         source_uri: SourceUri(source_uri.to_string()),
         chunk_index,
         content_hash: ContentHash(format!("hash_{chunk_index}")),
+        content: format!("content_{chunk_index}"),
+        ..ChunkMetadata::default()
     }
 }
 
