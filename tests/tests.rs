@@ -93,7 +93,7 @@ fn get_returns_inserted_point() {
     let metadata = make_metadata("doc_42", "memory://vectors", 3);
 
     store
-        .upsert(id.clone(), vec![1.0_f32, 2.0, 3.0], metadata.clone())
+        .upsert(id, vec![1.0_f32, 2.0, 3.0], metadata.clone())
         .unwrap();
 
     let point = store.get(&id).unwrap();
@@ -121,20 +121,20 @@ fn delete_removes_only_matching_point() {
 
     store
         .upsert(
-            keep_id.clone(),
+            keep_id,
             vec![0.1_f32, 0.2],
             make_metadata("doc_keep", "memory://keep", 0),
         )
         .unwrap();
     store
         .upsert(
-            delete_id.clone(),
+            delete_id,
             vec![0.3_f32, 0.4],
             make_metadata("doc_delete", "memory://delete", 1),
         )
         .unwrap();
 
-    store.delete(delete_id.clone());
+    store.delete(delete_id);
 
     assert_eq!(store.len(), 1);
     assert!(matches!(

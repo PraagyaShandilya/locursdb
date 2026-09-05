@@ -1,4 +1,5 @@
 mod client;
+pub(crate) mod local;
 mod types;
 
 pub use client::ApiClient;
