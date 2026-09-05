@@ -25,6 +25,10 @@ impl Ingest {
     }
 
     pub fn chunks_from_file(&self) -> Result<Vec<String>, TextError> {
+        if self.chunk_size == 0 {
+            return Err(TextError::InvalidChunkSize);
+        }
+
         match self.filetype {
             FileType::Txt => self.chunks_from_txt(),
         }

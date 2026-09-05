@@ -58,7 +58,7 @@ fn bench_get_top_k(c: &mut Criterion) {
                 BenchmarkId::new(format!("euclid_size{size}_dim{dim}"), 5),
                 &5_usize,
                 |b, &k| {
-                    b.iter(|| black_box(store.get_top_k(black_box(&query), black_box(k))));
+                    b.iter(|| black_box(store.get_top_k(black_box(&query), black_box(k)).unwrap()));
                 },
             );
         }
@@ -132,15 +132,33 @@ fn bench_distance_metrics(c: &mut Criterion) {
         let p2 = make_point(dim, 2);
 
         group.bench_with_input(BenchmarkId::new("euclid", dim), &dim, |b, _| {
-            b.iter(|| black_box(DistanceMetric::Euclid.distance(black_box(&p1), black_box(&p2))));
+            b.iter(|| {
+                black_box(
+                    DistanceMetric::Euclid
+                        .distance(black_box(&p1), black_box(&p2))
+                        .unwrap(),
+                )
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("cos", dim), &dim, |b, _| {
-            b.iter(|| black_box(DistanceMetric::Cos.distance(black_box(&p1), black_box(&p2))));
+            b.iter(|| {
+                black_box(
+                    DistanceMetric::Cos
+                        .distance(black_box(&p1), black_box(&p2))
+                        .unwrap(),
+                )
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("dot", dim), &dim, |b, _| {
-            b.iter(|| black_box(DistanceMetric::Dot.distance(black_box(&p1), black_box(&p2))));
+            b.iter(|| {
+                black_box(
+                    DistanceMetric::Dot
+                        .distance(black_box(&p1), black_box(&p2))
+                        .unwrap(),
+                )
+            });
         });
     }
 

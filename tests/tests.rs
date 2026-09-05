@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use locursdb::{
-    ChunkMetadata, ContentHash, DistanceMetric, DocumentId, Point, SourceUri, VectorID,
-    VectorIDError, VectorStore,
+    ChunkMetadata, ContentHash, DistanceMetric, DocumentId, FileType, Ingest, Point, SourceUri,
+    TextError, VectorID, VectorIDError, VectorStore,
 };
 
 fn make_metadata(document_id: &str, source_uri: &str, chunk_index: usize) -> ChunkMetadata {
@@ -93,7 +94,7 @@ fn get_returns_inserted_point() {
     let metadata = make_metadata("doc_42", "memory://vectors", 3);
 
     store
-        .upsert(id.clone(), vec![1.0_f32, 2.0, 3.0], metadata.clone())
+        .upsert(id, vec![1.0_f32, 2.0, 3.0], metadata.clone())
         .unwrap();
 
     let point = store.get(&id).unwrap();
@@ -121,20 +122,20 @@ fn delete_removes_only_matching_point() {
 
     store
         .upsert(
-            keep_id.clone(),
+            keep_id,
             vec![0.1_f32, 0.2],
             make_metadata("doc_keep", "memory://keep", 0),
         )
         .unwrap();
     store
         .upsert(
-            delete_id.clone(),
+            delete_id,
             vec![0.3_f32, 0.4],
             make_metadata("doc_delete", "memory://delete", 1),
         )
         .unwrap();
 
-    store.delete(delete_id.clone());
+    store.delete(delete_id);
 
     assert_eq!(store.len(), 1);
     assert!(matches!(
@@ -152,7 +153,7 @@ fn euclid_distance_matches_expected_value() {
     let point1 = make_point(vec![0.0, 0.0]);
     let point2 = make_point(vec![4.0, 5.0]);
 
-    let distance = DistanceMetric::Euclid.distance(&point1, &point2);
+    let distance = DistanceMetric::Euclid.distance(&point1, &point2).unwrap();
 
     assert_close(distance, 41.0);
 }
@@ -162,7 +163,7 @@ fn cosine_distance_is_zero_for_identical_vectors() {
     let point1 = make_point(vec![1.0, 2.0, 3.0]);
     let point2 = make_point(vec![1.0, 2.0, 3.0]);
 
-    let distance = DistanceMetric::Cos.distance(&point1, &point2);
+    let distance = DistanceMetric::Cos.distance(&point1, &point2).unwrap();
 
     assert_close(distance, 0.0);
 }
@@ -172,7 +173,7 @@ fn cosine_distance_is_one_for_orthogonal_vectors() {
     let point1 = make_point(vec![1.0, 0.0]);
     let point2 = make_point(vec![0.0, 1.0]);
 
-    let distance = DistanceMetric::Cos.distance(&point1, &point2);
+    let distance = DistanceMetric::Cos.distance(&point1, &point2).unwrap();
 
     assert_close(distance, 1.0);
 }
@@ -204,7 +205,7 @@ fn get_top_k_returns_nearest_vectors_for_euclidean_distance() {
         .unwrap();
 
     let query = make_point(vec![0.0_f32, 0.0]);
-    let top_k = store.get_top_k(&query, 2);
+    let top_k = store.get_top_k(&query, 2).unwrap();
 
     assert_eq!(top_k.len(), 2);
     assert_eq!(top_k[0].vec, vec![0.0_f32, 0.0]);
@@ -257,7 +258,7 @@ fn get_top_k_filtered_requires_all_label_matches() {
         ("role".to_string(), "user".to_string()),
     ]);
     let query = make_point(vec![0.0_f32, 0.0]);
-    let top_k = store.get_top_k_filtered(&query, 10, &filters);
+    let top_k = store.get_top_k_filtered(&query, 10, &filters).unwrap();
 
     assert_eq!(top_k.len(), 1);
     assert_eq!(top_k[0].metadata.content, "content_0");
@@ -269,4 +270,98 @@ fn get_top_k_filtered_requires_all_label_matches() {
         top_k[0].metadata.labels.get("role"),
         Some(&"user".to_string())
     );
+}
+
+#[test]
+fn empty_vector_is_rejected() {
+    let mut store = VectorStore::new(DistanceMetric::Euclid);
+
+    let error = store
+        .upsert(
+            VectorID::new(),
+            Vec::new(),
+            make_metadata("doc", "memory://empty", 0),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, VectorIDError::EmptyVector));
+}
+
+#[test]
+fn non_finite_vector_is_rejected() {
+    let mut store = VectorStore::new(DistanceMetric::Euclid);
+
+    let error = store
+        .upsert(
+            VectorID::new(),
+            vec![1.0, f32::NAN],
+            make_metadata("doc", "memory://nan", 0),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, VectorIDError::NonFiniteValue { index: 1 }));
+}
+
+#[test]
+fn query_dimension_mismatch_is_rejected() {
+    let mut store = VectorStore::new(DistanceMetric::Euclid);
+    store
+        .upsert(
+            VectorID::new(),
+            vec![1.0, 2.0],
+            make_metadata("doc", "memory://point", 0),
+        )
+        .unwrap();
+
+    let error = store
+        .get_top_k(&make_point(vec![1.0, 2.0, 3.0]), 1)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        VectorIDError::DimMismatch {
+            expected: 2,
+            actual: 3
+        }
+    ));
+}
+
+#[test]
+fn collection_length_mismatch_is_rejected_without_mutation() {
+    let mut store = VectorStore::new(DistanceMetric::Euclid);
+
+    let error = store
+        .create_collections(
+            vec![vec![1.0, 2.0]],
+            vec!["first".to_string(), "second".to_string()],
+            "test-model".to_string(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        VectorIDError::CollectionLengthMismatch {
+            embeddings: 1,
+            inputs: 2
+        }
+    ));
+    assert!(store.is_empty());
+}
+
+#[test]
+fn cosine_distance_rejects_zero_norm_vectors() {
+    let error = DistanceMetric::Cos
+        .distance(&make_point(vec![0.0, 0.0]), &make_point(vec![1.0, 0.0]))
+        .unwrap_err();
+
+    assert!(matches!(error, VectorIDError::ZeroNorm));
+}
+
+#[test]
+fn text_ingest_rejects_zero_chunk_size_before_reading() {
+    let ingest = Ingest::new(PathBuf::from("unused"), 0, FileType::Txt);
+
+    let error = ingest.chunks_from_file().unwrap_err();
+
+    assert!(matches!(error, TextError::InvalidChunkSize));
 }

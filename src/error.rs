@@ -3,13 +3,25 @@ use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum VectorIDError {
-    #[error("Vec Dimensions mismatched: expected {expected}, got {actual}")]
+    #[error("vector dimensions mismatched: expected {expected}, got {actual}")]
     DimMismatch { expected: usize, actual: usize },
 
-    #[error("Duplicate Vec ID: {0}")]
+    #[error("vectors must contain at least one dimension")]
+    EmptyVector,
+
+    #[error("vector contains a non-finite value at index {index}")]
+    NonFiniteValue { index: usize },
+
+    #[error("cosine distance is undefined for a zero-norm vector")]
+    ZeroNorm,
+
+    #[error("collection length mismatch: {embeddings} embeddings for {inputs} inputs")]
+    CollectionLengthMismatch { embeddings: usize, inputs: usize },
+
+    #[error("duplicate vector ID: {0}")]
     DuplicateId(String),
 
-    #[error("Vector not found: {0}")]
+    #[error("vector not found: {0}")]
     NotFound(String),
 }
 
@@ -26,6 +38,8 @@ pub enum DotEnvError {
         #[source]
         source: ParseIntError,
     },
+    #[error("{key} must be greater than zero")]
+    MustBePositive { key: &'static str },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +50,21 @@ pub enum ApiError {
     Api {
         status: reqwest::StatusCode,
         body: String,
+    },
+    #[error("{field} must be greater than zero")]
+    InvalidConfiguration { field: &'static str },
+    #[error("embedding response count mismatch: expected {expected}, got {actual}")]
+    EmbeddingCountMismatch { expected: usize, actual: usize },
+    #[error("embedding {embedding_index} dimensions mismatched: expected {expected}, got {actual}")]
+    EmbeddingDimMismatch {
+        embedding_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("embedding {embedding_index} contains a non-finite value at index {value_index}")]
+    NonFiniteEmbedding {
+        embedding_index: usize,
+        value_index: usize,
     },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -52,6 +81,9 @@ pub enum TextError {
 
     #[error("failed to initialize sentence segmenter: {0}")]
     SegmenterInit(String),
+
+    #[error("chunk size must be greater than zero")]
+    InvalidChunkSize,
 }
 
 #[derive(Debug, thiserror::Error)]

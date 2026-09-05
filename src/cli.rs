@@ -81,7 +81,8 @@ async fn run_cli_inner() -> Result<serde_json::Value, MainError> {
 fn create(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
     let metric = parse_metric(args.value("--metric").as_deref().unwrap_or("euclid"))?;
-    let dimensions = parse_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
+    let dimensions =
+        parse_positive_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
     validate_store_name(&name)?;
 
     let dir = store_dir(&name);
@@ -95,7 +96,7 @@ fn create(args: &Args) -> Result<serde_json::Value, MainError> {
     if !points_path(&dir).exists() {
         save_store(
             &dir,
-            &VectorStore::with_dimensions(config.metric.clone(), dimensions),
+            &VectorStore::with_dimensions(config.metric, dimensions),
         )?;
     }
 
@@ -164,14 +165,16 @@ async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
     let config = load_config(&dir)?;
     let mut store = load_store(&dir, &config)?;
     let labels = parse_key_values(args.value("--labels"))?;
-    let chunk_size = parse_usize_arg(args.value("--chunk-size"), "--chunk-size")?.unwrap_or(3000);
+    let chunk_size =
+        parse_positive_usize_arg(args.value("--chunk-size"), "--chunk-size")?.unwrap_or(3000);
     let chunk_overlap = parse_usize_arg(args.value("--chunk-overlap"), "--chunk-overlap")?
         .unwrap_or(chunk_size / 50);
     if chunk_overlap >= chunk_size {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "--chunk-overlap must be smaller than --chunk-size",
-        ))?;
+        )
+        .into());
     }
     let files = collect_files(&path)?;
     let mut added = 0usize;
@@ -191,6 +194,12 @@ async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
             .map(|chunk| chunk.content.clone())
             .collect::<Vec<_>>();
         let vectors = embed_many(args, contents, config.dimensions).await?;
+        if vectors.len() != chunks.len() {
+            return Err(crate::ApiError::EmbeddingCountMismatch {
+                expected: chunks.len(),
+                actual: vectors.len(),
+            })?;
+        }
         let language = language_for_path(&file);
         let document_id = DocumentId(Ulid::new().to_string());
         for (chunk_index, (chunk, vector)) in chunks.into_iter().zip(vectors).enumerate() {
@@ -248,7 +257,7 @@ async fn search(args: &Args) -> Result<serde_json::Value, MainError> {
         metadata: ChunkMetadata::default(),
     };
     let results: Vec<_> = store
-        .get_top_k_filtered_with_scores(&query, top_k, &filters)
+        .get_top_k_filtered_with_scores(&query, top_k, &filters)?
         .into_iter()
         .map(|(point, score)| {
             json!({ "id": point.id, "score": score, "vector": point.vec, "metadata": point.metadata, "content": point.metadata.content })
@@ -335,6 +344,18 @@ fn parse_usize_arg(value: Option<String>, key: &str) -> Result<Option<usize>, Ma
         .map_err(Into::into)
 }
 
+fn parse_positive_usize_arg(value: Option<String>, key: &str) -> Result<Option<usize>, MainError> {
+    let parsed = parse_usize_arg(value, key)?;
+    if parsed == Some(0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{key} must be greater than zero"),
+        )
+        .into());
+    }
+    Ok(parsed)
+}
+
 fn parse_key_values(value: Option<String>) -> Result<HashMap<String, String>, MainError> {
     let mut labels = HashMap::new();
     let Some(value) = value else {
@@ -345,7 +366,8 @@ fn parse_key_values(value: Option<String>) -> Result<HashMap<String, String>, Ma
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("invalid key/value pair: {pair}; expected k:v"),
-            ))?;
+            )
+            .into());
         };
         labels.insert(key.to_string(), value.to_string());
     }
@@ -429,7 +451,15 @@ fn parse_vector(raw: &str, dimensions: usize) -> Result<Vec<f32>, MainError> {
                 "vector dimensions mismatch: expected {dimensions}, got {}",
                 vector.len()
             ),
-        ))?;
+        )
+        .into());
+    }
+    if let Some(index) = vector.iter().position(|value| !value.is_finite()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("vector contains a non-finite value at index {index}"),
+        )
+        .into());
     }
     Ok(vector)
 }
@@ -624,7 +654,8 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>, MainError> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("path not found: {}", path.display()),
-        ))?;
+        )
+        .into());
     }
 
     let ignore_patterns = load_gitignore_patterns(path);
@@ -714,7 +745,8 @@ fn validate_store_name(name: &str) -> Result<(), MainError> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "store name must be a simple path segment",
-        ))?;
+        )
+        .into());
     }
     Ok(())
 }
@@ -740,28 +772,58 @@ fn save_config(dir: &Path, config: &StoreConfig) -> Result<(), MainError> {
 }
 
 fn load_config(dir: &Path) -> Result<StoreConfig, MainError> {
-    Ok(serde_json::from_slice(&fs::read(config_path(dir))?)?)
+    let config: StoreConfig = serde_json::from_slice(&fs::read(config_path(dir))?)?;
+    if config.dimensions == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stored dimensions must be greater than zero",
+        )
+        .into());
+    }
+    Ok(config)
 }
 
 fn save_store(dir: &Path, store: &VectorStore) -> Result<(), MainError> {
+    store.validate()?;
     fs::write(points_path(dir), serde_json::to_vec_pretty(store)?)?;
     Ok(())
 }
 
 fn load_store(dir: &Path, config: &StoreConfig) -> Result<VectorStore, MainError> {
-    if points_path(dir).exists() {
-        Ok(serde_json::from_slice(&fs::read(points_path(dir))?)?)
+    let store = if points_path(dir).exists() {
+        serde_json::from_slice(&fs::read(points_path(dir))?)?
     } else {
-        Ok(VectorStore::with_dimensions(
-            config.metric.clone(),
-            config.dimensions,
-        ))
+        VectorStore::with_dimensions(config.metric, config.dimensions)
+    };
+    store.validate()?;
+    if store.dimensions() != config.dimensions {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "store dimensions mismatch: config has {}, points have {}",
+                config.dimensions,
+                store.dimensions()
+            ),
+        )
+        .into());
     }
+    if store.metric() != config.metric {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "store metric mismatch: config has {:?}, points have {:?}",
+                config.metric,
+                store.metric()
+            ),
+        )
+        .into());
+    }
+    Ok(store)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::chunk_text;
+    use super::{chunk_text, parse_positive_usize_arg, parse_vector};
 
     #[test]
     fn recursive_chunking_prefers_paragraph_boundaries() {
@@ -785,5 +847,22 @@ mod tests {
         assert!(chunks[0].ends_with("three"));
         assert!(chunks[1].starts_with("three"));
         assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
+    }
+
+    #[test]
+    fn positive_usize_argument_rejects_zero() {
+        let error = parse_positive_usize_arg(Some("0".to_string()), "--dimensions").unwrap_err();
+
+        assert_eq!(error.to_string(), "--dimensions must be greater than zero");
+    }
+
+    #[test]
+    fn vector_argument_rejects_non_finite_values() {
+        let error = parse_vector("1,NaN", 2).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "vector contains a non-finite value at index 1"
+        );
     }
 }
