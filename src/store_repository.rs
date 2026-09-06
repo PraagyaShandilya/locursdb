@@ -34,16 +34,16 @@ pub(crate) struct StoreSummary {
 }
 
 #[derive(Debug)]
-pub(crate) struct StoreRepository {
+pub struct StoreRepository {
     root: PathBuf,
 }
 
 impl StoreRepository {
-    pub(crate) fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    pub(crate) fn from_environment() -> Self {
+    pub fn from_environment() -> Self {
         Self::new(
             env::var("LOCURSDB_ROOT")
                 .map(PathBuf::from)

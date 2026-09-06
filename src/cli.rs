@@ -1,11 +1,15 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use serde_json::json;
-use ulid::Ulid;
+use tokio::sync::OnceCell;
 
 use crate::{
-    ApiClient, AppConfig, ChunkMetadata, ContentHash, DistanceMetric, DocumentId, MainError, Point,
-    SourceUri, VectorID, embedding::local, ingest::source, store_repository::StoreRepository,
+    ApiClient, AppConfig, DistanceMetric, MainError, OpenRouterEmbedder, PseudoEmbedder, SourceUri,
+    VectorID,
+    application::{
+        AddContentRequest, AddPathRequest, Application, CreateStoreRequest, DeleteRequest,
+        DeleteTarget, EmbedFuture, Embedder, ProgressObserver, SearchRequest,
+    },
 };
 
 struct Args {
@@ -66,21 +70,24 @@ async fn run_cli_inner() -> Result<serde_json::Value, MainError> {
     }
 }
 
+fn application(embedder: Arc<dyn Embedder>) -> Application {
+    Application::from_environment(embedder)
+}
+
 fn create(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
     let metric = parse_metric(args.value("--metric").as_deref().unwrap_or("euclid"))?;
     let dimensions =
         parse_positive_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
-    let created = StoreRepository::from_environment().create(name.clone(), metric, dimensions)?;
-
-    Ok(json!({
-        "ok": true,
-        "command": "create",
-        "name": name,
-        "metric": created.config.metric,
-        "dimensions": dimensions,
-        "path": created.path
-    }))
+    let result =
+        application(Arc::new(LazyOpenRouterEmbedder::default())).create(CreateStoreRequest {
+            name: name.clone(),
+            metric,
+            dimensions,
+        })?;
+    Ok(
+        json!({ "ok": true, "command": "create", "name": name, "metric": result.metric, "dimensions": result.dimensions, "path": result.path }),
+    )
 }
 
 async fn add(args: &Args) -> Result<serde_json::Value, MainError> {
@@ -93,209 +100,184 @@ async fn add(args: &Args) -> Result<serde_json::Value, MainError> {
 
 async fn add_content(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
-    let repository = StoreRepository::from_environment();
-    let mut open = repository.open(&name)?;
-    let content = args.value("--content").unwrap_or_default();
-    let vector = vector_or_embed_one(args, &content, open.config.dimensions).await?;
+    let vector = args
+        .value("--vector")
+        .map(|raw| parse_vector(&raw))
+        .transpose()?;
+    let service = application(embedder_for(args)?);
     let id = args
         .value("--id")
-        .map(|id| {
-            VectorID::try_from(id.as_str())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
-        })
-        .transpose()?
-        .unwrap_or_else(VectorID::new);
-    let metadata = ChunkMetadata {
-        document_id: DocumentId(
-            args.value("--document-id")
-                .unwrap_or_else(|| Ulid::new().to_string()),
-        ),
-        source_uri: SourceUri(
-            args.value("--source")
-                .unwrap_or_else(|| "cli://add".to_string()),
-        ),
-        chunk_index: parse_usize_arg(args.value("--chunk-index"), "--chunk-index")?
-            .unwrap_or(open.store.len()),
-        content_hash: ContentHash(blake3::hash(content.as_bytes()).to_string()),
-        content,
-        labels: parse_key_values(args.value("--labels"))?,
-        path: None,
-        start_line: None,
-        end_line: None,
-        language: None,
-        session_folder: args.value("--session-folder"),
-    };
-
-    open.store.upsert(id, vector, metadata)?;
-    repository.save(&open)?;
-    Ok(json!({
-        "ok": true,
-        "command": "add",
-        "mode": "content",
-        "name": name,
-        "id": id,
-        "points": open.store.len()
-    }))
+        .map(|id| VectorID::try_from(id.as_str()).map_err(invalid_input))
+        .transpose()?;
+    let result = service
+        .add_content(
+            AddContentRequest {
+                name: name.clone(),
+                content: args.value("--content").unwrap_or_default(),
+                vector,
+                id,
+                document_id: args.value("--document-id").map(crate::DocumentId),
+                source_uri: Some(SourceUri(
+                    args.value("--source")
+                        .unwrap_or_else(|| "cli://add".to_string()),
+                )),
+                chunk_index: parse_usize_arg(args.value("--chunk-index"), "--chunk-index")?,
+                labels: parse_key_values(args.value("--labels"))?,
+                session_folder: args.value("--session-folder"),
+            },
+            None,
+        )
+        .await?;
+    Ok(
+        json!({ "ok": true, "command": "add", "mode": "content", "name": name, "id": result.id, "points": result.points }),
+    )
 }
 
 async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
     let path = PathBuf::from(required(args, "--path")?);
-    let repository = StoreRepository::from_environment();
-    let mut open = repository.open(&name)?;
-    let labels = parse_key_values(args.value("--labels"))?;
     let chunk_size =
         parse_positive_usize_arg(args.value("--chunk-size"), "--chunk-size")?.unwrap_or(3000);
     let chunk_overlap = parse_usize_arg(args.value("--chunk-overlap"), "--chunk-overlap")?
         .unwrap_or(chunk_size / 50);
-    if chunk_overlap >= chunk_size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "--chunk-overlap must be smaller than --chunk-size",
-        )
-        .into());
-    }
-
-    let files = source::discover(&path)?;
-    let mut added = 0usize;
-    let mut skipped = 0usize;
-    for file in files {
-        let chunks = match source::read_chunks(&file, chunk_size, chunk_overlap) {
-            Ok(chunks) => chunks,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-        let contents = chunks
-            .iter()
-            .map(|chunk| chunk.content.clone())
-            .collect::<Vec<_>>();
-        let vectors = embed_many(args, contents, open.config.dimensions).await?;
-        if vectors.len() != chunks.len() {
-            return Err(crate::ApiError::EmbeddingCountMismatch {
-                expected: chunks.len(),
-                actual: vectors.len(),
-            })?;
-        }
-        let language = source::language(&file);
-        let document_id = DocumentId(Ulid::new().to_string());
-        for (chunk_index, (chunk, vector)) in chunks.into_iter().zip(vectors).enumerate() {
-            let mut chunk_labels = labels.clone();
-            chunk_labels.insert("path".to_string(), file.to_string_lossy().into_owned());
-            chunk_labels.insert("start_line".to_string(), chunk.start_line.to_string());
-            chunk_labels.insert("end_line".to_string(), chunk.end_line.to_string());
-            if let Some(language) = language {
-                chunk_labels.insert("language".to_string(), language.to_string());
-            }
-            let metadata = ChunkMetadata {
-                document_id: document_id.clone(),
-                source_uri: SourceUri(file.to_string_lossy().into_owned()),
-                chunk_index,
-                content_hash: ContentHash(blake3::hash(chunk.content.as_bytes()).to_string()),
-                content: chunk.content,
-                labels: chunk_labels,
-                path: Some(file.to_string_lossy().into_owned()),
-                start_line: Some(chunk.start_line),
-                end_line: Some(chunk.end_line),
-                language: language.map(str::to_string),
+    // Keep path mode's historical behavior: --vector does not replace per-chunk embeddings.
+    let service = application(embedder_for(args)?);
+    let result = service
+        .add_path(
+            AddPathRequest {
+                name: name.clone(),
+                path: path.clone(),
+                labels: parse_key_values(args.value("--labels"))?,
                 session_folder: args.value("--session-folder"),
-            };
-            open.store.upsert(VectorID::new(), vector, metadata)?;
-            added += 1;
-        }
-    }
-    repository.save(&open)?;
-
-    Ok(json!({
-        "ok": true,
-        "command": "add",
-        "mode": "path",
-        "name": name,
-        "path": path,
-        "chunks_added": added,
-        "files_skipped": skipped,
-        "points": open.store.len()
-    }))
+                chunk_size,
+                chunk_overlap,
+            },
+            None,
+        )
+        .await?;
+    Ok(
+        json!({ "ok": true, "command": "add", "mode": "path", "name": name, "path": path, "chunks_added": result.chunks_added, "files_skipped": result.files_skipped, "points": result.points }),
+    )
 }
 
 async fn search(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
-    let open = StoreRepository::from_environment().open(&name)?;
-    let content = args
-        .value("--content")
-        .or_else(|| args.value("--query"))
-        .unwrap_or_default();
-    let vector = vector_or_embed_one(args, &content, open.config.dimensions).await?;
+    let vector = args
+        .value("--vector")
+        .map(|raw| parse_vector(&raw))
+        .transpose()?;
     let top_k = parse_usize_arg(
         args.value("--top-k").or_else(|| args.value("-k")),
         "--top-k",
     )?
     .unwrap_or(5);
-    let filters = parse_key_values(args.value("--filter"))?;
-    let query = Point {
-        id: VectorID::new(),
-        vec: vector,
-        metadata: ChunkMetadata::default(),
-    };
-    let results: Vec<_> = open
-        .store
-        .get_top_k_filtered_with_scores(&query, top_k, &filters)?
-        .into_iter()
-        .map(|(point, score)| {
-            json!({ "id": point.id, "score": score, "vector": point.vec, "metadata": point.metadata, "content": point.metadata.content })
-        })
-        .collect();
+    let service = application(embedder_for(args)?);
+    let hits = service
+        .search(
+            SearchRequest {
+                name: name.clone(),
+                content: args
+                    .value("--content")
+                    .or_else(|| args.value("--query"))
+                    .unwrap_or_default(),
+                vector,
+                top_k,
+                filters: parse_key_values(args.value("--filter"))?,
+            },
+            None,
+        )
+        .await?;
+    let results = hits.into_iter().map(|hit| {
+        let point = hit.point;
+        json!({ "id": point.id, "score": hit.score, "vector": point.vec, "metadata": point.metadata, "content": point.metadata.content })
+    }).collect::<Vec<_>>();
     Ok(json!({ "ok": true, "command": "search", "name": name, "top_k": top_k, "results": results }))
 }
 
 fn delete(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
-    let repository = StoreRepository::from_environment();
+    let service = application(Arc::new(LazyOpenRouterEmbedder::default()));
     if args.has("--store") {
-        repository.delete(&name)?;
+        service.delete(DeleteRequest {
+            name: name.clone(),
+            target: DeleteTarget::Store,
+        })?;
         return Ok(json!({ "ok": true, "command": "delete", "name": name, "deleted": "store" }));
     }
     let id = required(args, "--id")?;
-    let mut open = repository.open(&name)?;
-    let vector_id = VectorID::try_from(id.as_str())
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    open.store.delete(vector_id);
-    repository.save(&open)?;
+    let vector_id = VectorID::try_from(id.as_str()).map_err(invalid_input)?;
+    let result = service.delete(DeleteRequest {
+        name: name.clone(),
+        target: DeleteTarget::Point(vector_id),
+    })?;
     Ok(
-        json!({ "ok": true, "command": "delete", "name": name, "id": id, "points": open.store.len() }),
+        json!({ "ok": true, "command": "delete", "name": name, "id": id, "points": result.points.expect("point delete returns count") }),
     )
 }
 
 fn list() -> Result<serde_json::Value, MainError> {
-    let stores = StoreRepository::from_environment()
+    let stores = application(Arc::new(LazyOpenRouterEmbedder::default()))
         .list()?
         .into_iter()
         .map(|store| {
             json!({
-                "name": store.name,
-                "metric": store.metric,
-                "dimensions": store.dimensions,
-                "points": store.points,
-                "path": store.path
+                "name": store.name, "metric": store.metric, "dimensions": store.dimensions,
+                "points": store.points, "path": store.path
             })
         })
         .collect::<Vec<_>>();
     Ok(json!({ "ok": true, "command": "list", "stores": stores }))
 }
 
+fn embedder_for(args: &Args) -> Result<Arc<dyn Embedder>, MainError> {
+    // Explicit vectors historically bypass provider selection, including --embed validation.
+    if args.value("--path").is_none() && args.value("--vector").is_some() {
+        return Ok(Arc::new(LazyOpenRouterEmbedder::default()));
+    }
+    match parse_embed_mode(args)? {
+        EmbedMode::Pseudo => Ok(Arc::new(PseudoEmbedder)),
+        EmbedMode::OpenRouter => Ok(Arc::new(LazyOpenRouterEmbedder::default())),
+    }
+}
+
+#[derive(Debug, Default)]
+struct LazyOpenRouterEmbedder {
+    provider: OnceCell<OpenRouterEmbedder>,
+}
+
+impl Embedder for LazyOpenRouterEmbedder {
+    fn embed<'a>(
+        &'a self,
+        inputs: Vec<String>,
+        dimensions: usize,
+        observer: Option<&'a ProgressObserver>,
+    ) -> EmbedFuture<'a> {
+        Box::pin(async move {
+            let provider = self
+                .provider
+                .get_or_try_init(|| async {
+                    let config = AppConfig::load()?;
+                    Ok::<_, MainError>(OpenRouterEmbedder::new(ApiClient::new(
+                        dimensions,
+                        config.batch_size,
+                        config.embedding_concurrency,
+                        config.openrouter_api_key,
+                        config.model_name,
+                    )))
+                })
+                .await?;
+            provider.embed(inputs, dimensions, observer).await
+        })
+    }
+}
+
 fn help() -> serde_json::Value {
-    json!({
-        "ok": true,
-        "commands": ["create", "add", "search", "delete", "list"],
-        "usage": {
-            "create": "locursdb create --name <store> --metric <euclid|cos|dot> --dimensions <n>",
-            "add": "locursdb add --name <store> [--content <text>|--path <file-or-dir>|--vector <f32,...>] [--embed openrouter|pseudo] [--labels k:v,...] [--session-folder <path>] [--chunk-size <chars>] [--chunk-overlap <chars>]",
-            "search": "locursdb search --name <store> [--content <text>|--vector <f32,...>] [--embed openrouter|pseudo] [--top-k <n>] [--filter k:v,...]",
-            "delete": "locursdb delete --name <store> --id <vector-id> | --store",
-            "list": "locursdb list"
-        }
-    })
+    json!({ "ok": true, "commands": ["create", "add", "search", "delete", "list"], "usage": {
+        "create": "locursdb create --name <store> --metric <euclid|cos|dot> --dimensions <n>",
+        "add": "locursdb add --name <store> [--content <text>|--path <file-or-dir>|--vector <f32,...>] [--embed openrouter|pseudo] [--labels k:v,...] [--session-folder <path>] [--chunk-size <chars>] [--chunk-overlap <chars>]",
+        "search": "locursdb search --name <store> [--content <text>|--vector <f32,...>] [--embed openrouter|pseudo] [--top-k <n>] [--filter k:v,...]",
+        "delete": "locursdb delete --name <store> --id <vector-id> | --store", "list": "locursdb list"
+    }})
 }
 
 fn required(args: &Args, key: &str) -> Result<String, MainError> {
@@ -361,83 +343,23 @@ fn parse_metric(value: &str) -> Result<DistanceMetric, MainError> {
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid metric: {value}"),
-        ))?,
+        )
+        .into()),
     }
 }
 
-async fn vector_or_embed_one(
-    args: &Args,
-    content: &str,
-    dimensions: usize,
-) -> Result<Vec<f32>, MainError> {
-    if let Some(raw) = args.value("--vector") {
-        parse_vector(&raw, dimensions)
-    } else {
-        embed_many(args, vec![content.to_string()], dimensions)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "embedding response was empty",
-                )
-            })
-            .map_err(Into::into)
-    }
-}
-
-async fn embed_many(
-    args: &Args,
-    inputs: Vec<String>,
-    dimensions: usize,
-) -> Result<Vec<Vec<f32>>, MainError> {
-    match parse_embed_mode(args)? {
-        EmbedMode::Pseudo => Ok(local::embed_batch(&inputs, dimensions)),
-        EmbedMode::OpenRouter => {
-            let config = AppConfig::load()?;
-            let api = ApiClient::new(
-                dimensions,
-                config.batch_size,
-                config.embedding_concurrency,
-                config.openrouter_api_key,
-                config.model_name,
-            );
-            Ok(api.convert_input_to_embeddings(inputs).await?)
-        }
-    }
-}
-
-fn parse_vector(raw: &str, dimensions: usize) -> Result<Vec<f32>, MainError> {
-    let vector: Result<Vec<_>, _> = raw
-        .split(',')
+fn parse_vector(raw: &str) -> Result<Vec<f32>, MainError> {
+    raw.split(',')
         .filter(|part| !part.is_empty())
-        .map(|part| part.parse::<f32>())
-        .collect();
-    let vector = vector.map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid --vector: {error}"),
-        )
-    })?;
-    if vector.len() != dimensions {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "vector dimensions mismatch: expected {dimensions}, got {}",
-                vector.len()
-            ),
-        )
-        .into());
-    }
-    if let Some(index) = vector.iter().position(|value| !value.is_finite()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("vector contains a non-finite value at index {index}"),
-        )
-        .into());
-    }
-    Ok(vector)
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid --vector: {error}"),
+            )
+            .into()
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,7 +367,6 @@ enum EmbedMode {
     OpenRouter,
     Pseudo,
 }
-
 fn parse_embed_mode(args: &Args) -> Result<EmbedMode, MainError> {
     match args
         .value("--embed")
@@ -458,6 +379,11 @@ fn parse_embed_mode(args: &Args) -> Result<EmbedMode, MainError> {
         value => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid --embed: {value}; expected openrouter or pseudo"),
-        ))?,
+        )
+        .into()),
     }
+}
+
+fn invalid_input(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
 }

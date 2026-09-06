@@ -10,6 +10,12 @@ use crate::{ApiError, EmbeddingLogger, EmbeddingProgress};
 
 use super::{EmbeddingsApiResponse, EmbeddingsRequest};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingBatchProgress {
+    pub completed_batches: usize,
+    pub total_batches: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiClient {
     client: reqwest::Client,
@@ -40,6 +46,13 @@ impl ApiClient {
 
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    /// Clones the provider configuration while reusing reqwest's pooled client.
+    pub fn with_dimensions(&self, dimensions: usize) -> Self {
+        let mut client = self.clone();
+        client.dimensions = dimensions;
+        client
     }
 
     fn validate_configuration(&self) -> Result<(), ApiError> {
@@ -149,6 +162,32 @@ impl ApiClient {
         logger: Option<&EmbeddingLogger>,
         progress: Option<UnboundedSender<EmbeddingProgress>>,
     ) -> Result<Vec<Vec<f32>>, ApiError> {
+        self.convert_input_to_embeddings_inner(input, logger, progress, None)
+            .await
+    }
+
+    /// Converts inputs while reporting provider-neutral batch counts.
+    ///
+    /// The channel-based progress API remains available for existing callers.
+    pub async fn convert_input_to_embeddings_with_callback<F>(
+        &self,
+        input: Vec<String>,
+        callback: F,
+    ) -> Result<Vec<Vec<f32>>, ApiError>
+    where
+        F: Fn(EmbeddingBatchProgress) + Send + Sync,
+    {
+        self.convert_input_to_embeddings_inner(input, None, None, Some(&callback))
+            .await
+    }
+
+    async fn convert_input_to_embeddings_inner(
+        &self,
+        input: Vec<String>,
+        logger: Option<&EmbeddingLogger>,
+        progress: Option<UnboundedSender<EmbeddingProgress>>,
+        callback: Option<&(dyn Fn(EmbeddingBatchProgress) + Send + Sync)>,
+    ) -> Result<Vec<Vec<f32>>, ApiError> {
         self.validate_configuration()?;
         let batches: Vec<Vec<String>> = input
             .chunks(self.batch_size)
@@ -171,6 +210,12 @@ impl ApiClient {
                     input.len()
                 ),
             ));
+        }
+        if let Some(callback) = callback {
+            callback(EmbeddingBatchProgress {
+                completed_batches: 0,
+                total_batches: batch_count,
+            });
         }
 
         let completed_batches = Arc::new(AtomicUsize::new(0));
@@ -206,6 +251,7 @@ impl ApiClient {
                         )),
                     }
                 }
+                let completed = completed_batches.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(progress) = &progress {
                     let message = match &result {
                         Ok(embeddings) => format!(
@@ -214,8 +260,13 @@ impl ApiClient {
                         ),
                         Err(error) => format!("failed batch {batch_number}/{batch_count}: {error}"),
                     };
-                    let completed = completed_batches.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = progress.send(EmbeddingProgress::new(completed, batch_count, message));
+                }
+                if let Some(callback) = callback {
+                    callback(EmbeddingBatchProgress {
+                        completed_batches: completed,
+                        total_batches: batch_count,
+                    });
                 }
 
                 result
@@ -262,6 +313,18 @@ mod tests {
             "test-key".to_string(),
             "test-model".to_string(),
         )
+    }
+
+    #[test]
+    fn dimensions_builder_changes_only_requested_dimensions() {
+        let original = client(2, 3, 4);
+        let resized = original.with_dimensions(8);
+
+        assert_eq!(original.dimensions, 2);
+        assert_eq!(resized.dimensions, 8);
+        assert_eq!(resized.batch_size, 3);
+        assert_eq!(resized.embedding_concurrency, 4);
+        assert_eq!(resized.model_name(), "test-model");
     }
 
     #[test]
