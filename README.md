@@ -2,7 +2,8 @@
 
 `locursdb` is a small Rust vector-store project for experimenting with local embedding ingestion and retrieval.
 
-See [Architecture](docs/architecture.md) for module boundaries and dependency rules.
+The CLI and TUI share the same typed application service for ingestion, embedding, and search. See
+[Architecture](docs/architecture.md) for module boundaries and dependency rules.
 
 ## Configuration
 
@@ -30,7 +31,8 @@ During embedding and query processing, the TUI stays open and displays embedding
 log/embedding.log
 ```
 
-The file is overwritten on each run.
+The file is overwritten on each run. TUI searches build a temporary in-memory store and do not
+persist it; CLI store commands use the configured persistent store repository.
 
 ### TUI controls
 

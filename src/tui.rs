@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::EmbeddingProgress;
+use crate::application::{ApplicationEvent, WorkflowStage};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -61,7 +61,7 @@ enum Message {
     SwitchField,
     Submit,
     Quit,
-    Progress(EmbeddingProgress),
+    Progress(ApplicationEvent),
 }
 
 impl Interface {
@@ -98,7 +98,7 @@ pub async fn collect_input_and_process<T, E, F, Fut>(
 ) -> Result<Option<T>, E>
 where
     E: From<io::Error>,
-    F: FnOnce(TuiInput, UnboundedSender<EmbeddingProgress>) -> Fut,
+    F: FnOnce(TuiInput, UnboundedSender<ApplicationEvent>) -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
     let _guard = TerminalGuard::enter()?;
@@ -165,7 +165,7 @@ pub fn show_results(results: Vec<String>) -> io::Result<()> {
 
 fn drain_progress(
     interface: &mut Interface,
-    progress_rx: &mut UnboundedReceiver<EmbeddingProgress>,
+    progress_rx: &mut UnboundedReceiver<ApplicationEvent>,
 ) {
     while let Ok(progress) = progress_rx.try_recv() {
         update(interface, Message::Progress(progress));
@@ -231,10 +231,40 @@ fn update(interface: &mut Interface, message: Message) {
                 interface.running_state = RunningState::Done;
             }
         }
-        Message::Progress(progress) => {
-            interface.completed_batches = progress.completed_batches;
-            interface.total_batches = progress.total_batches;
-            interface.status = progress.message;
+        Message::Progress(event) => update_application_event(interface, event),
+    }
+}
+
+fn update_application_event(interface: &mut Interface, event: ApplicationEvent) {
+    match event {
+        ApplicationEvent::Stage(stage) => {
+            interface.status = match stage {
+                WorkflowStage::DiscoveringSources => "Discovering corpus sources...",
+                WorkflowStage::Chunking => "Reading and chunking corpus...",
+                WorkflowStage::Embedding => "Embedding...",
+                WorkflowStage::Persisting => "Persisting vector store...",
+                WorkflowStage::Searching => "Searching in-memory vector store...",
+            }
+            .to_string();
+            if stage == WorkflowStage::Embedding {
+                interface.completed_batches = 0;
+                interface.total_batches = 0;
+            }
+        }
+        ApplicationEvent::SourcesDiscovered { files } => {
+            interface.status = format!("Discovered {files} source file(s)");
+        }
+        ApplicationEvent::FileSkipped { path } => {
+            interface.status = format!("Skipped unreadable source: {}", path.display());
+        }
+        ApplicationEvent::EmbeddingProgress {
+            completed_batches,
+            total_batches,
+        } => {
+            interface.completed_batches = completed_batches;
+            interface.total_batches = total_batches;
+            interface.status =
+                format!("Embedding batches: {completed_batches}/{total_batches} complete");
         }
     }
 }
@@ -492,4 +522,74 @@ pub fn install_panic_hook() {
         let _ = restore_terminal();
         hook(panic_info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_stages_are_formatted_by_the_ui() {
+        let mut interface = Interface::processing();
+
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::Stage(WorkflowStage::Chunking)),
+        );
+        assert_eq!(interface.status, "Reading and chunking corpus...");
+
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::SourcesDiscovered { files: 3 }),
+        );
+        assert_eq!(interface.status, "Discovered 3 source file(s)");
+
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::FileSkipped {
+                path: PathBuf::from("bad.txt"),
+            }),
+        );
+        assert_eq!(interface.status, "Skipped unreadable source: bad.txt");
+    }
+
+    #[test]
+    fn each_embedding_stage_resets_then_reports_batch_counts() {
+        let mut interface = Interface::processing();
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::EmbeddingProgress {
+                completed_batches: 2,
+                total_batches: 4,
+            }),
+        );
+        assert_eq!(
+            (interface.completed_batches, interface.total_batches),
+            (2, 4)
+        );
+        assert_eq!(interface.status, "Embedding batches: 2/4 complete");
+
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::Stage(WorkflowStage::Embedding)),
+        );
+        assert_eq!(
+            (interface.completed_batches, interface.total_batches),
+            (0, 0)
+        );
+        assert_eq!(interface.status, "Embedding...");
+
+        update(
+            &mut interface,
+            Message::Progress(ApplicationEvent::EmbeddingProgress {
+                completed_batches: 1,
+                total_batches: 1,
+            }),
+        );
+        assert_eq!(
+            (interface.completed_batches, interface.total_batches),
+            (1, 1)
+        );
+        assert_eq!(interface.status, "Embedding batches: 1/1 complete");
+    }
 }

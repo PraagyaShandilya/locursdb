@@ -1,8 +1,7 @@
 # Architecture
 
-The project is migrating UI adapters onto a shared, typed in-process application API. The first
-phase moves the CLI; the TUI remains on the legacy workflow until its migration branch lands.
-Dependencies point inward from adapters to workflows and from workflows to implementation modules.
+Both UI adapters use a shared, typed in-process application API. Dependencies point inward from
+adapters to workflows and from workflows to implementation modules.
 
 ```mermaid
 graph LR
@@ -14,13 +13,14 @@ graph LR
     Embedder --> Local[embedding::local]
     Embedder --> Remote[embedding::ApiClient]
     Repository --> Vector
-    TUI[TUI: legacy, migration next] -.-> Legacy[legacy ingest / embedding APIs]
+    TUI[TUI: input / progress / present / compose] --> Application
 ```
 
 ## Ownership and dependency rules
 
-- `cli` owns argument parsing, provider composition, and JSON presentation. It does not open stores,
-  inspect persistence configuration, validate vector dimensions, ingest files, or perform searches.
+- `cli` owns argument parsing, provider composition, and JSON presentation. `app` and `tui` own
+  interactive composition, input, progress formatting, logging, and result presentation. Neither
+  adapter validates vector dimensions, ingests files, or performs searches directly.
 - `application` is the typed workflow boundary. It validates requests and embedding output,
   discovers store dimensions, constructs metadata, coordinates ingest/search, and saves only after a
   complete path-ingest batch succeeds. This prevents partial saves on embedding failures, not
@@ -47,7 +47,7 @@ actual corpus path as source metadata and never creates repository files.
 
 ## Migration status
 
-The CLI now calls `Application` exclusively for workflows. `app.rs` and `tui.rs` intentionally remain
-unchanged and continue using the legacy progress and ingest APIs. Their next migration should compose
-an `Embedder`, translate `ApplicationEvent` values into TUI messages, and call
-`Application::ingest_and_search` rather than duplicating orchestration.
+The CLI and TUI now call `Application` for all workflows. The TUI composes one remote provider and
+application instance, bridges neutral `ApplicationEvent` callbacks into its Tokio channel, and uses
+`Application::ingest_and_search`. Legacy public embedding progress APIs remain available for
+compatibility but are not used by the TUI adapter.
