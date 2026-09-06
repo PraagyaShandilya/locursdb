@@ -71,22 +71,7 @@ fn create(args: &Args) -> Result<serde_json::Value, MainError> {
     let metric = parse_metric(args.value("--metric").as_deref().unwrap_or("euclid"))?;
     let dimensions =
         parse_positive_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
-    validate_store_name(&name)?;
-
-    let dir = store_dir(&name);
-    fs::create_dir_all(&dir)?;
-    let config = StoreConfig {
-        name: name.clone(),
-        metric,
-        dimensions,
-    };
-    save_config(&dir, &config)?;
-    if !points_path(&dir).exists() {
-        save_store(
-            &dir,
-            &VectorStore::with_dimensions(config.metric, dimensions),
-        )?;
-    }
+    let created = StoreRepository::from_environment().create(name.clone(), metric, dimensions)?;
 
     Ok(json!({
         "ok": true,
@@ -186,14 +171,14 @@ async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
             .iter()
             .map(|chunk| chunk.content.clone())
             .collect::<Vec<_>>();
-        let vectors = embed_many(args, contents, config.dimensions).await?;
+        let vectors = embed_many(args, contents, open.config.dimensions).await?;
         if vectors.len() != chunks.len() {
             return Err(crate::ApiError::EmbeddingCountMismatch {
                 expected: chunks.len(),
                 actual: vectors.len(),
             })?;
         }
-        let language = language_for_path(&file);
+        let language = source::language(&file);
         let document_id = DocumentId(Ulid::new().to_string());
         for (chunk_index, (chunk, vector)) in chunks.into_iter().zip(vectors).enumerate() {
             let mut chunk_labels = labels.clone();
@@ -255,7 +240,7 @@ async fn search(args: &Args) -> Result<serde_json::Value, MainError> {
     };
     let results: Vec<_> = open
         .store
-        .get_top_k_filtered_with_scores(&query, top_k, &filters)
+        .get_top_k_filtered_with_scores(&query, top_k, &filters)?
         .into_iter()
         .map(|(point, score)| {
             json!({ "id": point.id, "score": score, "vector": point.vec, "metadata": point.metadata, "content": point.metadata.content })
