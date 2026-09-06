@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::DotEnvError;
 
@@ -46,7 +46,7 @@ impl AppConfig {
     }
 }
 
-fn load_env_map(path: &PathBuf) -> Result<HashMap<String, String>, DotEnvError> {
+fn load_env_map(path: &Path) -> Result<HashMap<String, String>, DotEnvError> {
     let iter = dotenvy::from_path_iter(path)?;
     let mut values = HashMap::new();
 
@@ -61,14 +61,14 @@ fn load_env_map(path: &PathBuf) -> Result<HashMap<String, String>, DotEnvError> 
 fn get_required(
     values: &HashMap<String, String>,
     key: &'static str,
-    path: &PathBuf,
+    path: &Path,
 ) -> Result<String, DotEnvError> {
     values
         .get(key)
         .cloned()
         .ok_or_else(|| DotEnvError::MissingEnvVar {
             key,
-            path: path.clone(),
+            path: path.to_path_buf(),
         })
 }
 

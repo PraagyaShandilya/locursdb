@@ -143,6 +143,10 @@ impl VectorStore {
     pub fn len(&self) -> usize {
         self.points.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
 }
 
 fn labels_match(labels: &HashMap<String, String>, filters: &HashMap<String, String>) -> bool {

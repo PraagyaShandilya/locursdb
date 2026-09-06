@@ -16,6 +16,12 @@ impl VectorID {
     }
 }
 
+impl Default for VectorID {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl From<Ulid> for VectorID {
     fn from(value: Ulid) -> Self {
         Self(value)

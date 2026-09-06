@@ -12,15 +12,14 @@ pub enum DistanceMetric {
 
 impl DistanceMetric {
     pub fn distance(&self, point1: &Point, point2: &Point) -> f32 {
-        let distance = match self {
+        match self {
             Self::Cos => Self::score_cos(point1, point2),
             Self::Euclid => Self::score_euclid(point1, point2),
             Self::Dot => Self::score_dot_product(point1, point2),
-        };
-        distance
+        }
     }
 
-    fn euclid_norm(vec: &Vec<f32>) -> f32 {
+    fn euclid_norm(vec: &[f32]) -> f32 {
         let sum: f32 = vec.iter().map(|x| x * x).sum();
         sum.sqrt()
     }
