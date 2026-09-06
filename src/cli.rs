@@ -69,8 +69,24 @@ async fn run_cli_inner() -> Result<serde_json::Value, MainError> {
 fn create(args: &Args) -> Result<serde_json::Value, MainError> {
     let name = required(args, "--name")?;
     let metric = parse_metric(args.value("--metric").as_deref().unwrap_or("euclid"))?;
-    let dimensions = parse_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
-    let created = StoreRepository::from_environment().create(name.clone(), metric, dimensions)?;
+    let dimensions =
+        parse_positive_usize_arg(args.value("--dimensions"), "--dimensions")?.unwrap_or(1536);
+    validate_store_name(&name)?;
+
+    let dir = store_dir(&name);
+    fs::create_dir_all(&dir)?;
+    let config = StoreConfig {
+        name: name.clone(),
+        metric,
+        dimensions,
+    };
+    save_config(&dir, &config)?;
+    if !points_path(&dir).exists() {
+        save_store(
+            &dir,
+            &VectorStore::with_dimensions(config.metric, dimensions),
+        )?;
+    }
 
     Ok(json!({
         "ok": true,
@@ -143,14 +159,16 @@ async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
     let repository = StoreRepository::from_environment();
     let mut open = repository.open(&name)?;
     let labels = parse_key_values(args.value("--labels"))?;
-    let chunk_size = parse_usize_arg(args.value("--chunk-size"), "--chunk-size")?.unwrap_or(3000);
+    let chunk_size =
+        parse_positive_usize_arg(args.value("--chunk-size"), "--chunk-size")?.unwrap_or(3000);
     let chunk_overlap = parse_usize_arg(args.value("--chunk-overlap"), "--chunk-overlap")?
         .unwrap_or(chunk_size / 50);
     if chunk_overlap >= chunk_size {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "--chunk-overlap must be smaller than --chunk-size",
-        ))?;
+        )
+        .into());
     }
 
     let files = source::discover(&path)?;
@@ -168,8 +186,14 @@ async fn add_path(args: &Args) -> Result<serde_json::Value, MainError> {
             .iter()
             .map(|chunk| chunk.content.clone())
             .collect::<Vec<_>>();
-        let vectors = embed_many(args, contents, open.config.dimensions).await?;
-        let language = source::language(&file);
+        let vectors = embed_many(args, contents, config.dimensions).await?;
+        if vectors.len() != chunks.len() {
+            return Err(crate::ApiError::EmbeddingCountMismatch {
+                expected: chunks.len(),
+                actual: vectors.len(),
+            })?;
+        }
+        let language = language_for_path(&file);
         let document_id = DocumentId(Ulid::new().to_string());
         for (chunk_index, (chunk, vector)) in chunks.into_iter().zip(vectors).enumerate() {
             let mut chunk_labels = labels.clone();
@@ -314,6 +338,18 @@ fn parse_usize_arg(value: Option<String>, key: &str) -> Result<Option<usize>, Ma
         .map_err(Into::into)
 }
 
+fn parse_positive_usize_arg(value: Option<String>, key: &str) -> Result<Option<usize>, MainError> {
+    let parsed = parse_usize_arg(value, key)?;
+    if parsed == Some(0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{key} must be greater than zero"),
+        )
+        .into());
+    }
+    Ok(parsed)
+}
+
 fn parse_key_values(value: Option<String>) -> Result<HashMap<String, String>, MainError> {
     let mut labels = HashMap::new();
     let Some(value) = value else {
@@ -324,7 +360,8 @@ fn parse_key_values(value: Option<String>) -> Result<HashMap<String, String>, Ma
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("invalid key/value pair: {pair}; expected k:v"),
-            ))?;
+            )
+            .into());
         };
         labels.insert(key.to_string(), value.to_string());
     }
@@ -405,6 +442,13 @@ fn parse_vector(raw: &str, dimensions: usize) -> Result<Vec<f32>, MainError> {
                 "vector dimensions mismatch: expected {dimensions}, got {}",
                 vector.len()
             ),
+        )
+        .into());
+    }
+    if let Some(index) = vector.iter().position(|value| !value.is_finite()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("vector contains a non-finite value at index {index}"),
         )
         .into());
     }

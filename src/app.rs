@@ -93,10 +93,18 @@ async fn run_query(
     logger.trace(format!("query embedding started: top_k={top_k}"));
     let query_embeddings = api.embeddings_api_call(vec![query.clone()]).await?;
     logger.trace("query embedding finished");
+    let query_embedding =
+        query_embeddings
+            .into_iter()
+            .next()
+            .ok_or(crate::ApiError::EmbeddingCountMismatch {
+                expected: 1,
+                actual: 0,
+            })?;
 
     let query_point = Point {
         id: VectorID::new(),
-        vec: query_embeddings[0].clone(),
+        vec: query_embedding,
         metadata: ChunkMetadata {
             document_id: DocumentId(Ulid::new().to_string()),
             source_uri: SourceUri(api.model_name().to_string()),
@@ -114,7 +122,7 @@ async fn run_query(
 
     logger.trace("top-k search started");
     let results = store
-        .get_top_k(&query_point, top_k)
+        .get_top_k(&query_point, top_k)?
         .into_iter()
         .map(|point| point.metadata.content)
         .collect();

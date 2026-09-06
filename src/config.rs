@@ -31,10 +31,10 @@ impl AppConfig {
                 "CORPUS_PATH",
                 manifest_dir.join("corpus/sample.txt"),
             ),
-            batch_size: parse_usize(&values, "BATCH_SIZE")?,
-            embedding_concurrency: parse_usize(&values, "EMBEDDING_CONCURRENCY")?,
-            chunk_size: parse_usize(&values, "CHUNK_SIZE")?,
-            dimensions: parse_usize(&values, "DIMENSIONS")?,
+            batch_size: parse_positive_usize(&values, "BATCH_SIZE")?,
+            embedding_concurrency: parse_positive_usize(&values, "EMBEDDING_CONCURRENCY")?,
+            chunk_size: parse_positive_usize(&values, "CHUNK_SIZE")?,
+            dimensions: parse_positive_usize(&values, "DIMENSIONS")?,
             top_k: parse_optional_usize(&values, "TOP_K", 5)?,
             openrouter_api_key: get_required(
                 &values,
@@ -72,13 +72,20 @@ fn get_required(
         })
 }
 
-fn parse_usize(values: &HashMap<String, String>, key: &'static str) -> Result<usize, DotEnvError> {
+fn parse_positive_usize(
+    values: &HashMap<String, String>,
+    key: &'static str,
+) -> Result<usize, DotEnvError> {
     let value = get_required(
         values,
         key,
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env"),
     )?;
-    parse_usize_value(key, value)
+    let parsed = parse_usize_value(key, value)?;
+    if parsed == 0 {
+        return Err(DotEnvError::MustBePositive { key });
+    }
+    Ok(parsed)
 }
 
 fn parse_optional_usize(
@@ -111,4 +118,23 @@ fn parse_path(values: &HashMap<String, String>, key: &'static str, default: Path
             }
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_positive_usize;
+    use crate::DotEnvError;
+    use std::collections::HashMap;
+
+    #[test]
+    fn positive_usize_rejects_zero() {
+        let values = HashMap::from([("DIMENSIONS".to_string(), "0".to_string())]);
+
+        let error = parse_positive_usize(&values, "DIMENSIONS").unwrap_err();
+
+        assert!(matches!(
+            error,
+            DotEnvError::MustBePositive { key: "DIMENSIONS" }
+        ));
+    }
 }

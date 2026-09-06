@@ -42,10 +42,59 @@ impl ApiClient {
         &self.model_name
     }
 
+    fn validate_configuration(&self) -> Result<(), ApiError> {
+        for (field, value) in [
+            ("dimensions", self.dimensions),
+            ("batch size", self.batch_size),
+            ("embedding concurrency", self.embedding_concurrency),
+        ] {
+            if value == 0 {
+                return Err(ApiError::InvalidConfiguration { field });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_embeddings(
+        &self,
+        expected_count: usize,
+        embeddings: &[Vec<f32>],
+    ) -> Result<(), ApiError> {
+        if embeddings.len() != expected_count {
+            return Err(ApiError::EmbeddingCountMismatch {
+                expected: expected_count,
+                actual: embeddings.len(),
+            });
+        }
+
+        for (embedding_index, embedding) in embeddings.iter().enumerate() {
+            if embedding.len() != self.dimensions {
+                return Err(ApiError::EmbeddingDimMismatch {
+                    embedding_index,
+                    expected: self.dimensions,
+                    actual: embedding.len(),
+                });
+            }
+            if let Some(value_index) = embedding.iter().position(|value| !value.is_finite()) {
+                return Err(ApiError::NonFiniteEmbedding {
+                    embedding_index,
+                    value_index,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn embeddings_api_call(
         &self,
         inputs: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, ApiError> {
+        self.validate_configuration()?;
+        let expected_count = inputs.len();
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
         let request = EmbeddingsRequest::new(inputs, &self.model_name, self.dimensions);
 
         let res = self
@@ -64,13 +113,17 @@ impl ApiClient {
             return Err(ApiError::Api { status, body });
         }
 
-        match serde_json::from_str::<EmbeddingsApiResponse>(&body)? {
-            EmbeddingsApiResponse::Success(response) => Ok(response.into_embeddings()),
-            EmbeddingsApiResponse::Error(error) => Err(ApiError::Api {
-                status,
-                body: format!("{} | body: {}", error.error.message, body),
-            }),
-        }
+        let embeddings = match serde_json::from_str::<EmbeddingsApiResponse>(&body)? {
+            EmbeddingsApiResponse::Success(response) => response.into_embeddings(),
+            EmbeddingsApiResponse::Error(error) => {
+                return Err(ApiError::Api {
+                    status,
+                    body: format!("{} | body: {}", error.error.message, body),
+                });
+            }
+        };
+        self.validate_embeddings(expected_count, &embeddings)?;
+        Ok(embeddings)
     }
 
     pub async fn convert_input_to_embeddings(
@@ -96,6 +149,7 @@ impl ApiClient {
         logger: Option<&EmbeddingLogger>,
         progress: Option<UnboundedSender<EmbeddingProgress>>,
     ) -> Result<Vec<Vec<f32>>, ApiError> {
+        self.validate_configuration()?;
         let batches: Vec<Vec<String>> = input
             .chunks(self.batch_size)
             .map(|batch| batch.to_vec())
@@ -192,5 +246,79 @@ impl ApiClient {
         }
 
         Ok(embeddings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiClient;
+    use crate::ApiError;
+
+    fn client(dimensions: usize, batch_size: usize, concurrency: usize) -> ApiClient {
+        ApiClient::new(
+            dimensions,
+            batch_size,
+            concurrency,
+            "test-key".to_string(),
+            "test-model".to_string(),
+        )
+    }
+
+    #[test]
+    fn configuration_rejects_zero_values() {
+        let error = client(4, 0, 1).validate_configuration().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::InvalidConfiguration {
+                field: "batch size"
+            }
+        ));
+    }
+
+    #[test]
+    fn embedding_validation_rejects_wrong_count() {
+        let error = client(2, 1, 1)
+            .validate_embeddings(2, &[vec![1.0, 2.0]])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::EmbeddingCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn embedding_validation_rejects_wrong_dimensions() {
+        let error = client(3, 1, 1)
+            .validate_embeddings(1, &[vec![1.0, 2.0]])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::EmbeddingDimMismatch {
+                embedding_index: 0,
+                expected: 3,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn embedding_validation_rejects_non_finite_values() {
+        let error = client(2, 1, 1)
+            .validate_embeddings(1, &[vec![1.0, f32::NAN]])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::NonFiniteEmbedding {
+                embedding_index: 0,
+                value_index: 1
+            }
+        ));
     }
 }
