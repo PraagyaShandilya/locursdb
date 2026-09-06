@@ -1,10 +1,11 @@
 pub mod app;
-pub mod cli;
+mod cli;
 mod config;
 mod embedding;
 mod error;
 mod ingest;
 mod logging;
+mod store_repository;
 mod tui;
 mod vector;
 

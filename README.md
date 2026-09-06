@@ -2,6 +2,8 @@
 
 `locursdb` is a small Rust vector-store project for experimenting with local embedding ingestion and retrieval.
 
+See [Architecture](docs/architecture.md) for module boundaries and dependency rules.
+
 ## Configuration
 
 Create a `.env` file in the project root with:
